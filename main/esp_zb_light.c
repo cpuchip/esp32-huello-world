@@ -12,6 +12,7 @@
  * CONDITIONS OF ANY KIND, either express or implied.
  */
 
+#include "driver/gpio.h"
 #include "esp_zb_light.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -24,8 +25,35 @@
 #error Define ZB_ZCZR in idf.py menuconfig to compile light (Router) source code.
 #endif
 
+
+
 static const char *TAG = "ESP_ZB_COLOR_DIMM_LIGHT";
 /********************* Define functions **************************/
+#define BUTTON_GPIO 9  // Boot button
+
+static QueueHandle_t button_evt_queue = NULL;
+
+static void IRAM_ATTR gpio_isr_handler(void *arg)
+{
+    uint32_t gpio_num = (uint32_t)arg;
+    xQueueSendFromISR(button_evt_queue, &gpio_num, 0);
+}
+
+static void button_task(void *arg)
+{
+    uint32_t io_num;
+    for (;;) {
+        if (xQueueReceive(button_evt_queue, &io_num, portMAX_DELAY)) {
+            // Simple debounce delay
+            vTaskDelay(pdMS_TO_TICKS(50));
+            if (gpio_get_level(io_num) == 0) {
+                ESP_LOGI(TAG, "Button pressed; triggering factory reset!");
+                esp_zb_factory_reset();
+            }
+        }
+    }
+}
+
 static esp_err_t deferred_driver_init(void)
 {
     light_driver_init(LIGHT_DEFAULT_OFF);
@@ -230,6 +258,21 @@ static void esp_zb_task(void *pvParameters)
 
 void app_main(void)
 {
+    // Initialize button GPIO
+    button_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_NEGEDGE,          // Interrupt on falling edge
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << BUTTON_GPIO),
+        .pull_up_en = GPIO_PULLUP_ENABLE,          // Enable pull-up resistor
+    };
+    gpio_config(&io_conf);
+    
+    // Install GPIO ISR service and add handler for the button
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(BUTTON_GPIO, gpio_isr_handler, (void *)BUTTON_GPIO);
+    xTaskCreate(button_task, "button_task", 2048, NULL, 10, NULL);
+
     esp_zb_platform_config_t config = {
         .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
